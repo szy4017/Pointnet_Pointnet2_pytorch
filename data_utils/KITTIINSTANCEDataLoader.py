@@ -1,63 +1,93 @@
 import os
 import numpy as np
+import math
 
 from tqdm import tqdm
 from torch.utils.data import Dataset
 
 
-class S3DISDataset(Dataset):
-    def __init__(self, split='train', data_root='trainval_fullarea', num_point=4096, test_area=5, block_size=1.0, sample_rate=1.0, transform=None):
+class KITTIINSTANCEDataset(Dataset):
+    def __init__(self, split='train', data_root='trainval_fullarea', num_point=1024, test_area=5, block_size=1.0, sample_rate=1.0, transform=None):
         super().__init__()
         self.num_point = num_point
         self.block_size = block_size
         self.transform = transform
-        rooms = sorted(os.listdir(data_root))
-        rooms = [room for room in rooms if 'Area_' in room]
+        self.sample_rate = sample_rate
         if split == 'train':
-            rooms_split = [room for room in rooms if not 'Area_{}'.format(test_area) in room]
+            with open(os.path.join(data_root, 'ImageSets', 'train.txt'), 'r') as f:
+                data_str = f.read()
+                set_split = data_str.split('\n')
+                set_split.sort()
         else:
-            rooms_split = [room for room in rooms if 'Area_{}'.format(test_area) in room]
+            with open(os.path.join(data_root, 'ImageSets', 'val.txt'), 'r') as f:
+                data_str = f.read()
+                set_split = data_str.split('\n')
+                set_split.sort()
 
-        self.room_points, self.room_labels = [], []
-        self.room_coord_min, self.room_coord_max = [], []
+        self.collect_points, self.collect_labels = [], []
+        self.collect_coord_min, self.collect_coord_max = [], []
         num_point_all = []
-        labelweights = np.zeros(13)
+        labelweights = np.ones(2)
 
-        for room_name in tqdm(rooms_split, total=len(rooms_split)):
-            room_path = os.path.join(data_root, room_name)
-            room_data = np.load(room_path)  # xyzrgbl, N*7
-            points, labels = room_data[:, 0:6], room_data[:, 6]  # xyzrgb, N*6; l, N
-            tmp, _ = np.histogram(labels, range(14))
+        for data_name in tqdm(set_split, total=len(set_split)):
+            point_path = os.path.join(data_root, 'training', 'point_feature', '{}_point_feature.npy'.format(data_name))
+            label_path = os.path.join(data_root, 'training', 'point_sem_label', '{}_sem_label.npy'.format(data_name))
+            instance_mask_path = os.path.join(data_root, 'training', 'point_ins_mask', '{}_ins_mask.npy'.format(data_name))
+            point = np.load(point_path)   # (x, y, z, prob, r, g, b)  N*7
+            label = np.load(label_path)
+            instance_mask = np.load(instance_mask_path)
+            tmp, _ = np.histogram(label, range(3))
             labelweights += tmp
-            coord_min, coord_max = np.amin(points, axis=0)[:3], np.amax(points, axis=0)[:3]
-            self.room_points.append(points), self.room_labels.append(labels)
-            self.room_coord_min.append(coord_min), self.room_coord_max.append(coord_max)
-            num_point_all.append(labels.size)
+            for im in range(instance_mask.shape[1]):
+                ins_mask = instance_mask[:, im]
+                ins_point = point[ins_mask, :]
+                ins_label = label[ins_mask]
+                if ins_point.size > 0:
+                    coord_min, coord_max = np.amin(ins_point, axis=0)[:3], np.amax(ins_point, axis=0)[:3]
+                    self.collect_points.append(ins_point), self.collect_labels.append(ins_label)
+                    self.collect_coord_min.append(coord_min), self.collect_coord_max.append(coord_max)
+                    num_point_all.append(ins_label.size)
+                    # print(ins_label.size)
+
+        print('mean num {}'.format(np.mean(num_point_all)))
+        print('max num {}'.format(np.max(num_point_all)))
+        print('min num {}'.format(np.min(num_point_all)))
         labelweights = labelweights.astype(np.float32)
         labelweights = labelweights / np.sum(labelweights)
         self.labelweights = np.power(np.amax(labelweights) / labelweights, 1 / 3.0)
         print(self.labelweights)
-        sample_prob = num_point_all / np.sum(num_point_all)
-        num_iter = int(np.sum(num_point_all) * sample_rate / num_point)
-        room_idxs = []
-        for index in range(len(rooms_split)):
-            room_idxs.extend([index] * int(round(sample_prob[index] * num_iter)))
-        self.room_idxs = np.array(room_idxs)
-        print("Totally {} samples in {} set.".format(len(self.room_idxs), split))
+        data_idxs = range(len(self.collect_labels))
+        self.data_idxs = np.array(data_idxs)
+        print("Totally {} samples in {} set.".format(len(self.data_idxs), split))
 
     def __getitem__(self, idx):
-        room_idx = self.room_idxs[idx]
-        points = self.room_points[room_idx]   # N * 6
-        labels = self.room_labels[room_idx]   # N
-        N_points = points.shape[0]
+        data_idx = self.data_idxs[idx]
+        point = self.collect_points[idx]   # N * 7
+        label = self.collect_labels[idx]   # N
+        N_point = point.shape[0]
 
-        # 在训练集中采用对点云进行随机采样的方式获取训练数据，每次输入模型的点云数量也是相同的
+        if N_point < self.num_point:
+            sample_num = math.floor(N_point*self.sample_rate)
+            sample_idx = np.random.choice(range(N_point), sample_num)
+            sample_point = point[sample_idx, :]
+            sample_label = label[sample_idx]
+            expand_num = math.ceil((self.num_point-N_point)/sample_num)
+
+            # 将各个维度均重复
+            expand_point = np.tile(sample_point, (expand_num, 1))
+            expand_label = np.tile(sample_label, expand_num)
+            expand_point = np.reshape(expand_point, (-1, 7))
+            expand_label = np.reshape(expand_label, (-1,))
+            expand_point[:, :3] = expand_point[:, :3] + np.random.rand(expand_point.shape[0], 3) * 0.1
+            point = np.concatenate((point, expand_point), axis=0)
+            label = np.concatenate((label, expand_label))
+
         while (True):
-            center = points[np.random.choice(N_points)][:3] # 随机选择一个点云作为block的中心点
-            block_min = center - [self.block_size / 2.0, self.block_size / 2.0, 0]  # 获取对应的block范围
-            block_max = center + [self.block_size / 2.0, self.block_size / 2.0, 0]
-            # 获取block范围内的点云索引
-            point_idxs = np.where((points[:, 0] >= block_min[0]) & (points[:, 0] <= block_max[0]) & (points[:, 1] >= block_min[1]) & (points[:, 1] <= block_max[1]))[0]
+            center = point[np.random.choice(N_point)][:3]
+            coord_x, coord_y, _ = self.collect_coord_max[idx] - self.collect_coord_min[idx]
+            block_min = center - [coord_x / 2.0, coord_y / 2.0, 0]
+            block_max = center + [coord_x / 2.0, coord_y / 2.0, 0]
+            point_idxs = np.where((point[:, 0] >= block_min[0]) & (point[:, 0] <= block_max[0]) & (point[:, 1] >= block_min[1]) & (point[:, 1] <= block_max[1]))[0]
             if point_idxs.size > 1024:
                 break
 
@@ -67,22 +97,22 @@ class S3DISDataset(Dataset):
             selected_point_idxs = np.random.choice(point_idxs, self.num_point, replace=True)
 
         # normalize
-        selected_points = points[selected_point_idxs, :]  # num_point * 6
-        current_points = np.zeros((self.num_point, 9))  # num_point * 9
-        current_points[:, 6] = selected_points[:, 0] / self.room_coord_max[room_idx][0]
-        current_points[:, 7] = selected_points[:, 1] / self.room_coord_max[room_idx][1]
-        current_points[:, 8] = selected_points[:, 2] / self.room_coord_max[room_idx][2]
+        selected_points = point[selected_point_idxs, :]  # num_point * 7
+        current_points = np.zeros((self.num_point, 10))  # num_point * 10
+        current_points[:, 7] = selected_points[:, 0] / self.collect_coord_max[idx][0]
+        current_points[:, 8] = selected_points[:, 1] / self.collect_coord_max[idx][1]
+        current_points[:, 9] = selected_points[:, 2] / self.collect_coord_max[idx][2]
         selected_points[:, 0] = selected_points[:, 0] - center[0]
         selected_points[:, 1] = selected_points[:, 1] - center[1]
-        selected_points[:, 3:6] /= 255.0
-        current_points[:, 0:6] = selected_points
-        current_labels = labels[selected_point_idxs]
+        selected_points[:, 4:7] /= 255.0
+        current_points[:, 0:7] = selected_points
+        current_labels = label[selected_point_idxs]
         if self.transform is not None:
             current_points, current_labels = self.transform(current_points, current_labels)
         return current_points, current_labels
 
     def __len__(self):
-        return len(self.room_idxs)
+        return len(self.data_idxs)
 
 class ScannetDatasetWholeScene():
     # prepare to give prediction on each points
@@ -175,12 +205,12 @@ class ScannetDatasetWholeScene():
         return len(self.scene_points_list)
 
 if __name__ == '__main__':
-    # S3DISDataset
+    # KITTIINSTANCEDataset
     # '''
-    data_root = '/data/szy4017/code/Pointnet_Pointnet2_pytorch/data/s3dis/stanford_indoor3d/'
-    num_point, test_area, block_size, sample_rate = 4096, 5, 1.0, 0.01
+    data_root = '/data/szy4017/code/Pointnet_Pointnet2_pytorch/data/kitti_instance'
+    num_point, test_area, block_size, sample_rate = 1024, 5, 1.0, 0.3
 
-    point_data = S3DISDataset(split='train', data_root=data_root, num_point=num_point, test_area=test_area, block_size=block_size, sample_rate=sample_rate, transform=None)
+    point_data = KITTIINSTANCEDataset(split='train', data_root=data_root, num_point=num_point, test_area=test_area, block_size=block_size, sample_rate=sample_rate, transform=None)
     print('point data size:', point_data.__len__())
     print('point data 0 shape:', point_data.__getitem__(0)[0].shape)
     print('point label 0 shape:', point_data.__getitem__(0)[1].shape)

@@ -105,7 +105,7 @@ python collect_indoor3d_data.py
 ```
 Processed data will save in `data/stanford_indoor3d/`.
 ### Run
-```
+```shell
 ## Check model in ./models 
 ## e.g., pointnet2_ssg
 python train_semseg.py --model pointnet2_sem_seg --test_area 5 --log_dir pointnet2_sem_seg
