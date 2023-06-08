@@ -167,9 +167,34 @@ class KittiInstanceDatasetWholeScene():
         self.labelweights = np.power(np.amax(labelweights) / labelweights, 1 / 3.0)
 
     def __getitem__(self, index):
-        point_set_ini = self.scene_points_list[index]
-        points = point_set_ini[:,:6]
+        scene_points = self.scene_points_list[index]
         labels = self.semantic_labels_list[index]
+        instance_indices = self.instance_indices_list[index]
+
+        collect_points_list = []
+        collect_indices_list = []
+        for ins_indices in instance_indices:
+            if ins_indices.size > self.block_points:    # 单个实例点云数量大于block的点云数量，则需要进行进一步切分
+                num_block = np.ceil(ins_indices.size/self.block_points)
+                ins_points = scene_points[ins_indices]
+                # 对ins_points根据z进行排序，对应对ins_indices的顺序也改变
+                ins_points, ins_indices = sort_points_indices(ins_points, ins_indices)
+                for block_id in range(num_block):
+                    if block_id == num_block-1: # 最后一个block要判断是否需要进行point expand
+                        blk_points = ins_points[block_id*self.block_points:, :]
+                        blk_indices = ins_indices[block_id*self.block_points:]
+                        if blk_indices.size < self.block_points:
+                            blk_points, blk_indices = expand_instance_point(blk_points, blk_indices)
+                    else:   # 其他情况，直接获取对应的顺序的points和indices
+                        blk_points = ins_points[block_id*self.block_points:(block_id+1)*self.block_points, :]
+                        blk_indices = ins_indices[block_id*self.block_points:(block_id+1)*self.block_points]
+                    collect_points_list.append(blk_points)
+                    collect_indices_list.append()
+
+            else:   # 单个实例点云数量小于block的点云数量，则需要点云数量的扩展
+                ins_points = scene_points[ins_indices]
+                ins_points, ins_indices = expand_instance_point(ins_points, ins_indices)
+
         coord_min, coord_max = np.amin(points, axis=0)[:3], np.amax(points, axis=0)[:3] # 获取点云的空间范围，xyz上的最小最大值
         grid_x = int(np.ceil(float(coord_max[0] - coord_min[0] - self.block_size) / self.stride) + 1)   # 根据block_size对点云在x上的划分
         grid_y = int(np.ceil(float(coord_max[1] - coord_min[1] - self.block_size) / self.stride) + 1)   # 根据block_size对点云在y上的划分
