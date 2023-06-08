@@ -117,38 +117,51 @@ class KITTIINSTANCEDataset(Dataset):
     def __len__(self):
         return len(self.data_idxs)
 
-class ScannetDatasetWholeScene():
+class KittiInstanceDatasetWholeScene():
     # prepare to give prediction on each points
-    def __init__(self, root, block_points=4096, split='test', test_area=5, stride=0.5, block_size=1.0, padding=0.001):
+    def __init__(self, data_root, block_points=1024, split='test', test_area=5, stride=0.5, block_size=1.0, padding=0.001):
         self.block_points = block_points
         self.block_size = block_size
         self.padding = padding
-        self.root = root
+        self.root = data_root
         self.split = split
         self.stride = stride
         self.scene_points_num = []
         assert split in ['train', 'test']
-        if self.split == 'train':
-            self.file_list = [d for d in os.listdir(root) if d.find('Area_%d' % test_area) is -1]
+        if split == 'train':
+            with open(os.path.join(data_root, 'ImageSets', 'train.txt'), 'r') as f:
+                data_str = f.read()
+                set_split = data_str.split('\n')
+                set_split.sort()
         else:
-            self.file_list = [d for d in os.listdir(root) if d.find('Area_%d' % test_area) is not -1]
+            with open(os.path.join(data_root, 'ImageSets', 'val.txt'), 'r') as f:
+                data_str = f.read()
+                set_split = data_str.split('\n')
+                set_split.sort()
         self.scene_points_list = []
         self.semantic_labels_list = []
-        self.room_coord_min, self.room_coord_max = [], []
-        for file in self.file_list:
-            data = np.load(root + file)
-            points = data[:, :3]
-            self.scene_points_list.append(data[:, :6])
-            self.semantic_labels_list.append(data[:, 6])
-            coord_min, coord_max = np.amin(points, axis=0)[:3], np.amax(points, axis=0)[:3]
-            self.room_coord_min.append(coord_min), self.room_coord_max.append(coord_max)
-        assert len(self.scene_points_list) == len(self.semantic_labels_list)
+        self.instance_indices_list = []
+        labelweights = np.ones(2)
 
-        labelweights = np.zeros(13)
-        for seg in self.semantic_labels_list:
-            tmp, _ = np.histogram(seg, range(14))
-            self.scene_points_num.append(seg.shape[0])
+        for data_name in tqdm(set_split, total=len(set_split)):
+            point_path = os.path.join(data_root, 'training', 'point_feature', '{}_point_feature.npy'.format(data_name))
+            label_path = os.path.join(data_root, 'training', 'point_sem_label', '{}_sem_label.npy'.format(data_name))
+            instance_mask_path = os.path.join(data_root, 'training', 'point_ins_mask', '{}_ins_mask.npy'.format(data_name))
+            point = np.load(point_path)   # (x, y, z, prob, r, g, b)  N*7
+            label = np.load(label_path)
+            self.scene_points_list.append(point)
+            self.semantic_labels_list.append(label)
+            instance_mask = np.load(instance_mask_path)
+            tmp, _ = np.histogram(label, range(3))
             labelweights += tmp
+            instance_indices = []
+            for im in range(instance_mask.shape[1]):
+                ins_mask = instance_mask[:, im]
+                ins_indices = np.where(ins_mask)[0]
+                if len(ins_indices) > 0:
+                    instance_indices.append(ins_indices)
+            self.instance_indices_list.append(instance_indices)
+
         labelweights = labelweights.astype(np.float32)
         labelweights = labelweights / np.sum(labelweights)
         self.labelweights = np.power(np.amax(labelweights) / labelweights, 1 / 3.0)
@@ -208,15 +221,14 @@ class ScannetDatasetWholeScene():
         return len(self.scene_points_list)
 
 if __name__ == '__main__':
-    # KITTIINSTANCEDataset
+    # KittiInstanceDatasetWholeScene
     # '''
     data_root = '/data/szy4017/code/Pointnet_Pointnet2_pytorch/data/kitti_instance'
-    num_point, test_area, block_size, sample_rate = 1024, 5, 1.0, 0.3
-
-    point_data = KITTIINSTANCEDataset(split='train', data_root=data_root, num_point=num_point, sample_rate=sample_rate, transform=None)
+    point_data = KittiInstanceDatasetWholeScene(data_root, split='test', test_area=5, block_points=4096)
     print('point data size:', point_data.__len__())
     print('point data 0 shape:', point_data.__getitem__(0)[0].shape)
     print('point label 0 shape:', point_data.__getitem__(0)[1].shape)
+
     import torch, time, random
     manual_seed = 123
     random.seed(manual_seed)
@@ -232,27 +244,3 @@ if __name__ == '__main__':
             print('time: {}/{}--{}'.format(i+1, len(train_loader), time.time() - end))
             end = time.time()    
     # '''
-
-    # ScannetDatasetWholeScene
-    '''
-    data_root = '/data/szy4017/code/Pointnet_Pointnet2_pytorch/data/s3dis/stanford_indoor3d/'
-    point_data = ScannetDatasetWholeScene(data_root, split='test', test_area=5, block_points=4096)
-    print('point data size:', point_data.__len__())
-    print('point data 0 shape:', point_data.__getitem__(0)[0].shape)
-    print('point label 0 shape:', point_data.__getitem__(0)[1].shape)
-
-    import torch, time, random
-    manual_seed = 123
-    random.seed(manual_seed)
-    np.random.seed(manual_seed)
-    torch.manual_seed(manual_seed)
-    torch.cuda.manual_seed_all(manual_seed)
-    def worker_init_fn(worker_id):
-        random.seed(manual_seed + worker_id)
-    train_loader = torch.utils.data.DataLoader(point_data, batch_size=16, shuffle=True, num_workers=16, pin_memory=True, worker_init_fn=worker_init_fn)
-    for idx in range(4):
-        end = time.time()
-        for i, (input, target) in enumerate(train_loader):
-            print('time: {}/{}--{}'.format(i+1, len(train_loader), time.time() - end))
-            end = time.time()    
-    '''

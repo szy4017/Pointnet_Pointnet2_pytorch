@@ -181,3 +181,31 @@ If you find this repo useful in your research, please consider citing it and our
 * [PCT: Point Cloud Transformer](https://github.com/MenghaoGuo/PCT)
 * [PSNet: Fast Data Structuring for Hierarchical Deep Learning on Point Cloud](https://github.com/lly007/PointStructuringNet)
 * [Stratified Transformer for 3D Point Cloud Segmentation, CVPR'22](https://github.com/dvlab-research/stratified-transformer)
+
+## 实验规划
+
+关于点云类别标签特征增强对点云检测的影响
+
+实验组：
+
+1. 使用标量类别标签，标签获取直接来自图像分割映射
+2. 使用one-hot类别标签，标签获取直接来自图像分割映射
+3. 使用one-hot+概率类别标签，标签获取直接来自图像分割映射
+4. 使用标量类别标签，标签获取来自前景点云分割模块
+5. 使用one-hot类别标签，标签获取来自前景点云分割模块
+6. 使用one-hot+概率类别标签，标签获取来自前景点云分割模块
+7. 使用one-hot+概率+遮挡属性类别标签，标签获取来自前景点云分割模块+遮挡辅助
+8. 分析直接映射和不同预测映射的真实前景点云分割精度
+
+模型改进：
+
+1. pointnet进行点云分割（已完成）
+2. pointnet2进行点云分割
+3. pointnet2+前景目标图像点云一致性约束
+4. pointnet2+前景目标图像点云一致性约束+目标遮挡约束
+
+代码进度：
+
+1. 数据集改造
+2. 模型训练
+3. 模型推理
