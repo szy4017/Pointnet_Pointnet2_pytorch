@@ -7,7 +7,7 @@ from torch.utils.data import Dataset
 
 
 class KITTIINSTANCEDataset(Dataset):
-    def __init__(self, split='train', data_root='trainval_fullarea', num_point=1024, sample_rate=1.0, transform=None):
+    def __init__(self, split='train', data_root='trainval_fullarea', num_point=1024, sample_rate=0.3, transform=None):
         super().__init__()
         self.num_point = num_point
         self.transform = transform

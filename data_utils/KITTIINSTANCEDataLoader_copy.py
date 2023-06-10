@@ -119,13 +119,11 @@ class KITTIINSTANCEDataset(Dataset):
 
 class KittiInstanceDatasetWholeScene():
     # prepare to give prediction on each points
-    def __init__(self, data_root, block_points=1024, split='test', test_area=5, stride=0.5, block_size=1.0, padding=0.001):
+    def __init__(self, data_root, block_points=1024, split='test', sample_rate=0.3):
         self.block_points = block_points
-        self.block_size = block_size
-        self.padding = padding
         self.root = data_root
         self.split = split
-        self.stride = stride
+        self.sample_rate = sample_rate
         self.scene_points_num = []
         assert split in ['train', 'test']
         if split == 'train':
@@ -178,69 +176,65 @@ class KittiInstanceDatasetWholeScene():
                 num_block = np.ceil(ins_indices.size/self.block_points)
                 ins_points = scene_points[ins_indices]
                 # 对ins_points根据z进行排序，对应对ins_indices的顺序也改变
-                ins_points, ins_indices = sort_points_indices(ins_points, ins_indices)
-                for block_id in range(num_block):
+                ins_points, ins_indices = self.sort_points_indices(ins_points, ins_indices)
+                for block_id in range(int(num_block)):
                     if block_id == num_block-1: # 最后一个block要判断是否需要进行point expand
                         blk_points = ins_points[block_id*self.block_points:, :]
                         blk_indices = ins_indices[block_id*self.block_points:]
                         if blk_indices.size < self.block_points:
-                            blk_points, blk_indices = expand_instance_point(blk_points, blk_indices)
+                            blk_points, blk_indices = self.expand_instance_point(blk_points, blk_indices)
                     else:   # 其他情况，直接获取对应的顺序的points和indices
                         blk_points = ins_points[block_id*self.block_points:(block_id+1)*self.block_points, :]
                         blk_indices = ins_indices[block_id*self.block_points:(block_id+1)*self.block_points]
                     collect_points_list.append(blk_points)
-                    collect_indices_list.append()
+                    collect_indices_list.append(blk_indices)
 
             else:   # 单个实例点云数量小于block的点云数量，则需要点云数量的扩展
                 ins_points = scene_points[ins_indices]
-                ins_points, ins_indices = expand_instance_point(ins_points, ins_indices)
+                ins_points, ins_indices = self.expand_instance_point(ins_points, ins_indices)
+                collect_points_list.append(ins_points)
+                collect_indices_list.append(ins_indices)
+        return collect_points_list, collect_indices_list, labels
 
-        coord_min, coord_max = np.amin(points, axis=0)[:3], np.amax(points, axis=0)[:3] # 获取点云的空间范围，xyz上的最小最大值
-        grid_x = int(np.ceil(float(coord_max[0] - coord_min[0] - self.block_size) / self.stride) + 1)   # 根据block_size对点云在x上的划分
-        grid_y = int(np.ceil(float(coord_max[1] - coord_min[1] - self.block_size) / self.stride) + 1)   # 根据block_size对点云在y上的划分
-        data_room, label_room, sample_weight, index_room = np.array([]), np.array([]), np.array([]),  np.array([])
-        for index_y in range(0, grid_y):
-            for index_x in range(0, grid_x):
-                s_x = coord_min[0] + index_x * self.stride
-                e_x = min(s_x + self.block_size, coord_max[0])
-                s_x = e_x - self.block_size
-                s_y = coord_min[1] + index_y * self.stride
-                e_y = min(s_y + self.block_size, coord_max[1])
-                s_y = e_y - self.block_size
+    def sort_points_indices(self, points, indices):
+        """
+        对点云进行z坐标的排序，对应indices也相应排序
+        Args:
+            points:
+            indices:
 
-                # 根据划分区域获取对应的点云索引
-                point_idxs = np.where(
-                    (points[:, 0] >= s_x - self.padding) & (points[:, 0] <= e_x + self.padding) & (points[:, 1] >= s_y - self.padding) & (
-                                points[:, 1] <= e_y + self.padding))[0]
-                if point_idxs.size == 0:
-                    continue
-                num_batch = int(np.ceil(point_idxs.size / self.block_points))   # 将每个grid中的点云再分配成固定数量的block中，num_batch就是要分配的block数量
-                point_size = int(num_batch * self.block_points)
-                replace = False if (point_size - point_idxs.size <= point_idxs.size) else True
-                point_idxs_repeat = np.random.choice(point_idxs, point_size - point_idxs.size, replace=replace)
-                point_idxs = np.concatenate((point_idxs, point_idxs_repeat))
-                np.random.shuffle(point_idxs)
-                data_batch = points[point_idxs, :]
-                normlized_xyz = np.zeros((point_size, 3))
-                normlized_xyz[:, 0] = data_batch[:, 0] / coord_max[0]   # 对点云的xyz进行归一化处理
-                normlized_xyz[:, 1] = data_batch[:, 1] / coord_max[1]
-                normlized_xyz[:, 2] = data_batch[:, 2] / coord_max[2]
-                data_batch[:, 0] = data_batch[:, 0] - (s_x + self.block_size / 2.0)
-                data_batch[:, 1] = data_batch[:, 1] - (s_y + self.block_size / 2.0)
-                data_batch[:, 3:6] /= 255.0 # 对点云颜色进行归一化处理
-                data_batch = np.concatenate((data_batch, normlized_xyz), axis=1)
-                label_batch = labels[point_idxs].astype(int)
-                batch_weight = self.labelweights[label_batch]
+        Returns:
 
-                data_room = np.vstack([data_room, data_batch]) if data_room.size else data_batch
-                label_room = np.hstack([label_room, label_batch]) if label_room.size else label_batch
-                sample_weight = np.hstack([sample_weight, batch_weight]) if label_room.size else batch_weight
-                index_room = np.hstack([index_room, point_idxs]) if index_room.size else point_idxs
-        data_room = data_room.reshape((-1, self.block_points, data_room.shape[1]))  # [block_num, block_points, point_feature] 根据block划分点云
-        label_room = label_room.reshape((-1, self.block_points))
-        sample_weight = sample_weight.reshape((-1, self.block_points))
-        index_room = index_room.reshape((-1, self.block_points))
-        return data_room, label_room, sample_weight, index_room
+        """
+        sort_order = np.argsort(-points[:, 2])
+        points_sorted = points[sort_order]
+        indices_sorted = indices[sort_order]
+        return points_sorted, indices_sorted
+
+    def expand_instance_point(self, points, indices):
+        """
+        对数量不足对点云进行扩展
+        Args:
+            points:
+            indices:
+
+        Returns:
+
+        """
+        N_point = points.shape[0]
+        sample_num = math.floor(N_point * self.sample_rate)
+        sample_idx = np.random.choice(range(N_point), sample_num)
+        sample_point = points[sample_idx, :]
+        expand_num = math.ceil((self.block_points - N_point) / sample_num)
+
+        # 将各个维度均重复
+        expand_point = np.tile(sample_point, (expand_num, 1))
+        expand_point = np.reshape(expand_point, (-1, 7))
+        expand_point[:, :3] = expand_point[:, :3] + np.random.rand(expand_point.shape[0], 3) * 0.1
+        points_exp = np.concatenate((points, expand_point[:(self.block_points-points.shape[0])]), axis=0)
+        expand_indices = -np.ones((self.block_points-points.shape[0],))
+        indices_exp = np.concatenate((indices, expand_indices))
+        return points_exp, indices_exp
 
     def __len__(self):
         return len(self.scene_points_list)
@@ -249,23 +243,16 @@ if __name__ == '__main__':
     # KittiInstanceDatasetWholeScene
     # '''
     data_root = '/data/szy4017/code/Pointnet_Pointnet2_pytorch/data/kitti_instance'
-    point_data = KittiInstanceDatasetWholeScene(data_root, split='test', test_area=5, block_points=4096)
-    print('point data size:', point_data.__len__())
-    print('point data 0 shape:', point_data.__getitem__(0)[0].shape)
-    print('point label 0 shape:', point_data.__getitem__(0)[1].shape)
+    TEST_DATASET_WHOLE_SCENE = KittiInstanceDatasetWholeScene(data_root, block_points=1024, split='test', sample_rate=0.3)
 
-    import torch, time, random
-    manual_seed = 123
-    random.seed(manual_seed)
-    np.random.seed(manual_seed)
-    torch.manual_seed(manual_seed)
-    torch.cuda.manual_seed_all(manual_seed)
-    def worker_init_fn(worker_id):
-        random.seed(manual_seed + worker_id)
-    train_loader = torch.utils.data.DataLoader(point_data, batch_size=16, shuffle=True, num_workers=16, pin_memory=True, worker_init_fn=worker_init_fn)
-    for idx in range(4):
-        end = time.time()
-        for i, (input, target) in enumerate(train_loader):
-            print('time: {}/{}--{}'.format(i+1, len(train_loader), time.time() - end))
-            end = time.time()    
+    num_scenes = len(TEST_DATASET_WHOLE_SCENE)
+    for scene_id in range(num_scenes):
+        print('scene id:', scene_id)
+        collect_points_list, collect_indices_list, labels = TEST_DATASET_WHOLE_SCENE.__getitem__(scene_id)
+        print('labels shape:', labels.shape)
+        for points, indices in zip(collect_points_list, collect_indices_list):
+            print('points data shape:', points.shape)
+            print('indices data shape:', indices.shape)
+
+
     # '''
